@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS generations (
   features_json TEXT NOT NULL,
   source_file_id TEXT NOT NULL,
   source_mime_type TEXT,
+  user_prompt TEXT NOT NULL DEFAULT '',
+  task_type TEXT NOT NULL DEFAULT 'edit_photo',
   status TEXT NOT NULL,
   quota_kind TEXT NOT NULL,
   ai_used INTEGER NOT NULL DEFAULT 0,
