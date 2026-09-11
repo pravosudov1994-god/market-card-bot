@@ -3,9 +3,9 @@ import type {
   Draft,
   GenerationRow,
   Marketplace,
-  PhotoMode,
   QuotaKind,
   SuccessfulPayment,
+  TaskType,
   TelegramUser,
   UserRow,
 } from "./types.ts";
@@ -124,9 +124,9 @@ export interface CreateGenerationInput {
   chatId: number;
   marketplace: Marketplace;
   style: CardStyle;
-  photoMode: PhotoMode;
   title: string;
-  features: string[];
+  userPrompt: string;
+  taskType: TaskType;
   sourceFileId: string;
   sourceMimeType?: string;
   quotaKind: QuotaKind;
@@ -138,8 +138,9 @@ export async function createGeneration(db: D1Database, input: CreateGenerationIn
     .prepare(
       `INSERT INTO generations (
          id, telegram_id, chat_id, marketplace, style, photo_mode, title, features_json,
-         source_file_id, source_mime_type, status, quota_kind, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+         source_file_id, source_mime_type, user_prompt, task_type,
+         status, quota_kind, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, 'product', ?, '[]', ?, ?, ?, ?, 'queued', ?, ?, ?)`,
     )
     .bind(
       input.id,
@@ -147,11 +148,11 @@ export async function createGeneration(db: D1Database, input: CreateGenerationIn
       input.chatId,
       input.marketplace,
       input.style,
-      input.photoMode,
       input.title,
-      JSON.stringify(input.features),
       input.sourceFileId,
       input.sourceMimeType ?? null,
+      input.userPrompt,
+      input.taskType,
       input.quotaKind,
       now,
       now,
