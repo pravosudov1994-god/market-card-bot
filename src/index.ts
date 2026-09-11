@@ -16,33 +16,29 @@ function json(value: unknown, status = 200): Response {
 }
 
 async function generationDiagnostics(env: Env): Promise<Response> {
-  const row = await env.DB
+  const columnsResult = await env.DB
+    .prepare("PRAGMA table_info(generations)")
+    .all<{ name: string }>();
+  const columns = new Set(columnsResult.results.map((column) => column.name));
+  const latest = await env.DB
     .prepare(
-      `SELECT status, error_code, ai_used, ai_error_code, photo_mode, created_at, updated_at
+      `SELECT status, error_code, ai_used, created_at, updated_at
        FROM generations ORDER BY created_at DESC LIMIT 1`,
     )
     .first<{
       status: string;
       error_code: string | null;
       ai_used: number;
-      ai_error_code: string | null;
-      photo_mode: string | null;
       created_at: number;
       updated_at: number;
     }>();
   return json({
     ok: true,
-    latest: row
-      ? {
-          status: row.status,
-          error_code: row.error_code,
-          ai_used: row.ai_used,
-          ai_error_code: row.ai_error_code,
-          photo_mode: row.photo_mode,
-          created_at: row.created_at,
-          updated_at: row.updated_at,
-        }
-      : null,
+    schema: {
+      has_ai_error_code: columns.has("ai_error_code"),
+      has_photo_mode: columns.has("photo_mode"),
+    },
+    latest,
   });
 }
 
