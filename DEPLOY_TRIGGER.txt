@@ -1,0 +1,2 @@
+Trigger Cloudflare Workers build for MarketCard AI.
+Commit generated from ChatGPT after repository connection.
