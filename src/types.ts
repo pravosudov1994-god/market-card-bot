@@ -1,12 +1,15 @@
 export type Marketplace = "ozon" | "wildberries" | "yandex";
 export type CardStyle = "minimal" | "premium" | "bright";
 export type PhotoMode = "ready" | "product";
+export type TaskType = "market_card" | "edit_photo";
 export type QuotaKind = "free" | "subscription";
 
 export interface Draft {
   sourceFileId?: string;
   sourceMimeType?: string;
   sourceFileSize?: number;
+  userPrompt?: string;
+  // Legacy fields remain optional so old drafts can be parsed safely after the flow change.
   marketplace?: Marketplace;
   photoMode?: PhotoMode;
   title?: string;
@@ -39,6 +42,8 @@ export interface GenerationRow {
   features_json: string;
   source_file_id: string;
   source_mime_type: string | null;
+  user_prompt: string;
+  task_type: TaskType;
   status: string;
   quota_kind: QuotaKind;
   ai_used: number;
