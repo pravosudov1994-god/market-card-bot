@@ -28,26 +28,62 @@ import {
   nowSeconds,
 } from "./utils.ts";
 
-const AI_MODEL = "@cf/black-forest-labs/flux-1-schnell";
+export const FLUX2_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 const MAX_RESULT_BYTES = 9 * 1024 * 1024;
+const AI_REFERENCE_SIZE = 480;
+const AI_OUTPUT_WIDTH = 768;
+const AI_OUTPUT_HEIGHT = 1024;
 
-function backgroundPrompt(style: CardStyle): string {
-  const mood = {
-    minimal: "clean airy light-gray studio, subtle soft blue geometry",
-    premium: "luxury dark studio, warm gold rim light, elegant matte surfaces",
-    bright: "colorful modern studio, playful gradients, pink cyan and yellow shapes",
+function styleDirection(style: CardStyle): string {
+  return {
+    minimal:
+      "clean airy premium studio, soft off-white and pale cool-gray materials, elegant soft daylight, restrained modern ecommerce aesthetic",
+    premium:
+      "luxury editorial studio, warm champagne and dark neutral accents, cinematic rim light, polished stone or satin surfaces, high-end beauty advertising aesthetic",
+    bright:
+      "bold modern commercial studio, sophisticated colorful gradients, playful sculptural shapes, vibrant but tasteful ecommerce campaign aesthetic",
   }[style];
+}
+
+export function productScenePrompt(style: CardStyle, title: string, features: string[]): string {
+  const context = [title, ...features].join("; ").replace(/\s+/g, " ").trim().slice(0, 420);
   return [
-    "Vertical ecommerce advertising background, 3:4 composition.",
-    mood,
-    "Large calm empty center area for a product card.",
-    "Abstract background only, no product, no people, no text, no letters, no numbers, no logo, no watermark.",
-    "Professional commercial lighting, high-end marketplace visual.",
+    "Create a vertical 3:4 premium ecommerce product photograph using input image 0 as the product reference.",
+    "Keep the same product identity, silhouette, proportions, dominant colors, packaging shape, cap shape and visible branding placement as faithfully as possible.",
+    "Do not translate, rewrite or invent packaging text. If lettering cannot be preserved accurately, keep it unobtrusive rather than creating new words.",
+    "Make the product the hero, large and centered, occupying roughly 55 to 70 percent of the image height.",
+    "Replace the original surroundings with a polished advertising set and professional commercial lighting.",
+    styleDirection(style) + ".",
+    `Product context: ${context || "consumer product"}.`,
+    "Leave useful negative space near the top and lower edges for later text overlays.",
+    "No people, hands, duplicate products, extra packages, price tags, badges, captions, floating letters, watermarks, marketplace logos or UI.",
+    "Photorealistic, clean edges, realistic contact shadow, premium catalog photography.",
   ].join(" ");
 }
 
-export function backgroundAiInput(style: CardStyle): { prompt: string; steps: number } {
-  return { prompt: backgroundPrompt(style), steps: 4 };
+export async function buildFlux2Input(
+  reference: Blob,
+  style: CardStyle,
+  title: string,
+  features: string[],
+): Promise<Record<string, unknown>> {
+  const form = new FormData();
+  form.append("prompt", productScenePrompt(style, title, features));
+  form.append("input_image_0", reference, "product-reference.jpg");
+  form.append("width", String(AI_OUTPUT_WIDTH));
+  form.append("height", String(AI_OUTPUT_HEIGHT));
+
+  const serialized = new Response(form);
+  const body = serialized.body;
+  const contentType = serialized.headers.get("content-type");
+  if (!body || !contentType) throw new Error("workers_ai_multipart_encode");
+
+  return {
+    multipart: {
+      body,
+      contentType,
+    },
+  };
 }
 
 interface AiImageExtraction {
@@ -78,6 +114,8 @@ export function workersAiErrorCode(error: unknown): string {
   if (status && status >= 400 && status <= 599) return `workers_ai_http_${status}`;
 
   const normalized = message.toLowerCase();
+  if (normalized.startsWith("ai_reference_")) return normalized.slice(0, 80);
+  if (normalized.includes("multipart")) return "workers_ai_multipart";
   if (normalized.includes("daily free allocation") || normalized.includes("quota")) return "workers_ai_quota";
   if (normalized.includes("out of capacity")) return "workers_ai_capacity";
   if (normalized.includes("timeout") || normalized.includes("timed out")) return "workers_ai_timeout";
@@ -152,6 +190,23 @@ function largestPhotoFileId(message: Awaited<ReturnType<typeof sendPhoto>>): str
   return photos.at(-1)?.file_id ?? null;
 }
 
+async function makeAiReference(env: Env, sourceUrl: string): Promise<Blob> {
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    *{box-sizing:border-box}html,body{margin:0;width:${AI_REFERENCE_SIZE}px;height:${AI_REFERENCE_SIZE}px;overflow:hidden;background:#f3f4f6}
+    img{display:block;width:100%;height:100%;object-fit:contain;background:#f3f4f6}
+  </style></head><body><img src="${escapeHtml(sourceUrl)}" alt=""></body></html>`;
+
+  const screenshot = await env.BROWSER.quickAction("screenshot", {
+    html,
+    viewport: { width: AI_REFERENCE_SIZE, height: AI_REFERENCE_SIZE },
+    screenshotOptions: { type: "jpeg", quality: 88, fullPage: false },
+  });
+  if (!screenshot.ok) throw new Error(`ai_reference_screenshot_${screenshot.status}`);
+  const bytes = await screenshot.arrayBuffer();
+  if (!bytes.byteLength) throw new Error("ai_reference_empty");
+  return new Blob([bytes], { type: "image/jpeg" });
+}
+
 export async function processGeneration(env: Env, generationId: string): Promise<void> {
   const job = await getGeneration(env.DB, generationId);
   if (!job || job.status !== "queued") return;
@@ -176,18 +231,24 @@ export async function processGeneration(env: Env, generationId: string): Promise
     const sourceType = allowedTypes.has(candidateType) ? candidateType : "image/jpeg";
     const sourceUrl = `data:${sourceType};base64,${bytesToBase64(new Uint8Array(sourceBytes))}`;
 
-    let backgroundUrl: string | undefined;
+    let aiSceneUrl: string | undefined;
+    let aiUsed = false;
     if (job.photo_mode === "product") {
       try {
-        const aiResult = await env.AI.run(AI_MODEL, backgroundAiInput(job.style));
+        const reference = await makeAiReference(env, sourceUrl);
+        const features = JSON.parse(job.features_json) as string[];
+        const aiInput = await buildFlux2Input(reference, job.style, job.title, features);
+        const aiResult = await env.AI.run(FLUX2_MODEL, aiInput);
         const extraction = await extractAiImage(aiResult);
         if (extraction.bytes?.byteLength) {
-          backgroundUrl = `data:${imageMime(extraction.bytes)};base64,${bytesToBase64(extraction.bytes)}`;
+          aiSceneUrl = `data:${imageMime(extraction.bytes)};base64,${bytesToBase64(extraction.bytes)}`;
+          aiUsed = true;
           await setGenerationAiResult(env.DB, job.id, true, null);
         } else {
           const code = extraction.errorCode ?? "workers_ai_empty_image";
-          console.warn("workers_ai_background_unusable", {
+          console.warn("workers_ai_scene_unusable", {
             generationId: job.id,
+            model: FLUX2_MODEL,
             code,
             shape: aiResultShape(aiResult),
           });
@@ -195,7 +256,7 @@ export async function processGeneration(env: Env, generationId: string): Promise
         }
       } catch (error) {
         const code = workersAiErrorCode(error);
-        console.warn("workers_ai_background_failed", { generationId: job.id, code });
+        console.warn("workers_ai_scene_failed", { generationId: job.id, model: FLUX2_MODEL, code });
         await setGenerationAiResult(env.DB, job.id, false, code);
       }
     } else {
@@ -209,7 +270,7 @@ export async function processGeneration(env: Env, generationId: string): Promise
       title: job.title,
       features: JSON.parse(job.features_json) as string[],
       sourceUrl,
-      ...(backgroundUrl ? { backgroundUrl } : {}),
+      ...(aiSceneUrl ? { backgroundUrl: aiSceneUrl } : {}),
     });
 
     const screenshot = await env.BROWSER.quickAction("screenshot", {
@@ -223,12 +284,16 @@ export async function processGeneration(env: Env, generationId: string): Promise
       throw new Error("result_file_invalid_size");
     }
 
+    const aiCaption =
+      job.photo_mode === "product" && aiUsed
+        ? "AI собрал рекламную сцену по вашему фото. Проверьте упаковку, логотип и текст товара перед публикацией."
+        : "Использовано исходное фото без AI-перерисовки товара. Проверьте текст и требования площадки перед публикацией.";
+
     const resultMessage = await sendPhoto(
       env,
       job.chat_id,
       resultBytes,
-      `✅ <b>Карточка для ${escapeHtml(marketplaceLabel(job.marketplace))} готова</b>\n\n` +
-        "Товар на исходном фото не перерисовывался. Проверьте текст и требования площадки перед публикацией.",
+      `✅ <b>Карточка для ${escapeHtml(marketplaceLabel(job.marketplace))} готова</b>\n\n${aiCaption}`,
       [
         [{ text: "✨ Создать ещё", callback_data: "create" }],
         [{ text: "📊 Мой тариф", callback_data: "plan" }],
