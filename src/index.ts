@@ -16,33 +16,6 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
-async function generationDiagnostics(env: Env): Promise<Response> {
-  const columnsResult = await env.DB
-    .prepare("PRAGMA table_info(generations)")
-    .all<{ name: string }>();
-  const columns = new Set(columnsResult.results.map((column) => column.name));
-  const latest = await env.DB
-    .prepare(
-      `SELECT status, error_code, ai_used, created_at, updated_at
-       FROM generations ORDER BY created_at DESC LIMIT 1`,
-    )
-    .first<{
-      status: string;
-      error_code: string | null;
-      ai_used: number;
-      created_at: number;
-      updated_at: number;
-    }>();
-  return json({
-    ok: true,
-    schema: {
-      has_ai_error_code: columns.has("ai_error_code"),
-      has_photo_mode: columns.has("photo_mode"),
-    },
-    latest,
-  });
-}
-
 async function webhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) {
     return json({ ok: false, error: "bot_not_configured" }, 503);
@@ -101,9 +74,6 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/health") {
       return json({ ok: true, configured: await isBotConfigured(env) });
-    }
-    if (request.method === "GET" && url.pathname === "/diagnostics/generation") {
-      return generationDiagnostics(runtimeEnv);
     }
     if (request.method === "GET" && url.pathname === "/terms") return termsPage(getConfig(runtimeEnv));
     if (request.method === "GET" && url.pathname === "/privacy") return privacyPage(getConfig(runtimeEnv));
