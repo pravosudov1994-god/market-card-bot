@@ -1,0 +1,42 @@
+name: Runtime diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/runtime-diagnostics.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Wait for Worker and capture sanitized diagnostics
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-diagnostics
+          ok=0
+          for i in $(seq 1 18); do
+            if curl -fsS --max-time 10 \
+              'https://market-card-bot.pravosudov1994.workers.dev/diagnostics/generation' \
+              -o runtime-diagnostics/latest.json; then
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo '{"ok":false,"error":"diagnostics_fetch_failed"}' > runtime-diagnostics/latest.json
+          fi
+      - name: Store result
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add runtime-diagnostics/latest.json
+          git commit -m 'Capture sanitized runtime diagnostics' || exit 0
+          git push origin HEAD:main
