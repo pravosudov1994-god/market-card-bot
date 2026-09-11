@@ -9,15 +9,13 @@ import {
   resetFlow,
   setFlow,
 } from "./db.ts";
-import { processGeneration } from "./generation.ts";
 import {
-  featuresKeyboard,
-  mainKeyboard,
-  marketplaceKeyboard,
-  photoModeKeyboard,
-  styleKeyboard,
-  urlKeyboard,
-} from "./templates.ts";
+  detectMarketplace,
+  detectStyle,
+  detectTaskType,
+  processGeneration,
+} from "./generation.ts";
+import { mainKeyboard, urlKeyboard } from "./templates.ts";
 import {
   answerCallbackQuery,
   answerPreCheckout,
@@ -27,9 +25,7 @@ import {
 } from "./telegram.ts";
 import type {
   CallbackQuery,
-  CardStyle,
   Env,
-  Marketplace,
   PreCheckoutQuery,
   SuccessfulPayment,
   TelegramMessage,
@@ -40,14 +36,12 @@ import type {
 import {
   cleanSingleLine,
   escapeHtml,
-  isCardStyle,
-  isMarketplace,
-  isPhotoMode,
   MAX_SOURCE_BYTES,
   nowSeconds,
   parseDraft,
-  parseFeatures,
 } from "./utils.ts";
+
+const MAX_PROMPT_LENGTH = 1400;
 
 function commandOf(text: string): string | null {
   if (!text.startsWith("/")) return null;
@@ -71,7 +65,8 @@ async function showWelcome(env: Env, chatId: number, firstName?: string): Promis
     env,
     chatId,
     `<b>Привет${greeting}! Я ${escapeHtml(config.botName)}.</b>\n\n` +
-      "Соберу вертикальную карточку 1200×1600 для Ozon, Wildberries или Яндекс Маркета. " +
+      "Пришлите фото товара, а затем обычными словами напишите, что хотите получить. " +
+      "Например: «Сделай премиальное рекламное фото на бежевом фоне» или «Сделай карточку для Ozon с текстом: 120 мл, витамин C».\n\n" +
       `Первые ${config.freeGenerations} генераций бесплатны, затем — подписка ${escapeHtml(config.priceLabelRub)} на 30 дней.`,
     { replyMarkup: mainKeyboard },
   );
@@ -82,7 +77,7 @@ async function startFlow(env: Env, userId: number, chatId: number): Promise<void
   await sendMessage(
     env,
     chatId,
-    "<b>Шаг 1 из 6. Пришлите фото товара.</b>\n\nЛучше всего подходит чёткий снимок на однотонном фоне до 5 МБ. Можно отправить как фото или файл PNG/JPEG/WebP.",
+    "<b>Пришлите фото товара.</b>\n\nПодойдут JPEG, PNG или WebP до 5 МБ. После фото я попрошу одним сообщением описать, что нужно сделать.",
     { replyMarkup: { inline_keyboard: [[{ text: "Отмена", callback_data: "cancel" }]] } },
   );
 }
@@ -111,7 +106,7 @@ async function showPlan(env: Env, user: UserRow, chatId: number): Promise<void> 
       replyMarkup: {
         inline_keyboard: [
           [{ text: "⭐ Оформить подписку", callback_data: "subscribe" }],
-          [{ text: "✨ Создать карточку", callback_data: "create" }],
+          [{ text: "✨ Создать", callback_data: "create" }],
         ],
       },
     },
@@ -185,7 +180,7 @@ async function handleSuccessfulPayment(
     chatId,
     `<b>Оплата прошла — подписка активна до ${formatDate(expiresAt)}.</b>\n\n` +
       `Доступно ${config.monthlyGenerations} генераций.`,
-    { replyMarkup: { inline_keyboard: [[{ text: "✨ Создать карточку", callback_data: "create" }]] } },
+    { replyMarkup: { inline_keyboard: [[{ text: "✨ Создать", callback_data: "create" }]] } },
   );
 }
 
@@ -209,9 +204,10 @@ async function acceptPhoto(env: Env, user: UserRow, message: TelegramMessage): P
   const document = message.document;
   const documentIsImage = Boolean(document?.mime_type?.startsWith("image/"));
   if (!photo && !documentIsImage) {
-    await sendMessage(env, message.chat.id, "Пришлите изображение товара: фото либо файл PNG/JPEG/WebP до 5 МБ.");
+    await sendMessage(env, message.chat.id, "Сначала пришлите фото товара: PNG, JPEG или WebP до 5 МБ.");
     return true;
   }
+
   const source = photo ?? document!;
   if ((source.file_size ?? 0) > MAX_SOURCE_BYTES) {
     await sendMessage(env, message.chat.id, "Файл больше 5 МБ. Сожмите изображение и отправьте его ещё раз.");
@@ -222,7 +218,8 @@ async function acceptPhoto(env: Env, user: UserRow, message: TelegramMessage): P
     await sendMessage(env, message.chat.id, "Поддерживаются только PNG, JPEG и WebP.");
     return true;
   }
-  await setFlow(env.DB, user.telegram_id, "awaiting_photo_mode", {
+
+  await setFlow(env.DB, user.telegram_id, "awaiting_prompt", {
     sourceFileId: source.file_id,
     sourceMimeType: mimeType,
     sourceFileSize: source.file_size,
@@ -230,64 +227,33 @@ async function acceptPhoto(env: Env, user: UserRow, message: TelegramMessage): P
   await sendMessage(
     env,
     message.chat.id,
-    "<b>Шаг 2 из 6. Как использовать фото?</b>\n\n" +
-      "Если снимок уже красивый и готовый — я сохраню его крупным. Если это обычное фото товара — соберу рекламную сцену вокруг него.",
-    { replyMarkup: photoModeKeyboard },
+    "<b>Теперь напишите, что нужно сделать с этим фото.</b>\n\n" +
+      "Пишите свободно, как человеку. Например:\n" +
+      "• Сделай премиальное рекламное фото косметики на бежевом фоне с мягким светом.\n" +
+      "• Сделай карточку для Ozon, товар крупно, добавь текст: 120 мл, витамин C.\n" +
+      "• Убери фон и поставь товар на белый мрамор, без текста.",
+    { replyMarkup: { inline_keyboard: [[{ text: "Отмена", callback_data: "cancel" }]] } },
   );
   return true;
 }
 
-async function acceptTextStep(env: Env, user: UserRow, message: TelegramMessage): Promise<boolean> {
-  if (!message.text) return false;
-  const draft = parseDraft(user.draft_json);
-  if (user.state === "awaiting_title") {
-    const title = cleanSingleLine(message.text, 72);
-    if (title.length < 2) {
-      await sendMessage(env, message.chat.id, "Название слишком короткое. Напишите от 2 до 72 символов.");
-      return true;
-    }
-    await setFlow(env.DB, user.telegram_id, "awaiting_features", { ...draft, title });
-    await sendMessage(
-      env,
-      message.chat.id,
-      "<b>Шаг 5 из 6. Напишите до четырёх преимуществ.</b>\n\nКаждое — с новой строки, например:\nЛёгкий корпус\nГарантия 2 года\nДоставка завтра",
-      { replyMarkup: featuresKeyboard },
-    );
-    return true;
-  }
-  if (user.state === "awaiting_features") {
-    const features = parseFeatures(message.text);
-    if (!features.length) {
-      await sendMessage(env, message.chat.id, "Не вижу преимуществ. Напишите каждое с новой строки или нажмите «Пропустить».", {
-        replyMarkup: featuresKeyboard,
-      });
-      return true;
-    }
-    await setFlow(env.DB, user.telegram_id, "awaiting_style", { ...draft, features });
-    await sendMessage(env, message.chat.id, "<b>Шаг 6 из 6. Выберите стиль.</b>", {
-      replyMarkup: styleKeyboard,
-    });
-    return true;
-  }
-  return false;
-}
-
-async function queueGeneration(
+async function queuePromptGeneration(
   env: Env,
   ctx: ExecutionContext,
   user: UserRow,
   chatId: number,
-  style: CardStyle,
+  userPrompt: string,
 ): Promise<void> {
   const config = getConfig(env);
   const draft = parseDraft(user.draft_json);
-  if (!draft.sourceFileId || !draft.marketplace || !draft.title) {
+  if (!draft.sourceFileId) {
     await resetFlow(env.DB, user.telegram_id);
-    await sendMessage(env, chatId, "Черновик устарел. Начните создание карточки заново.", {
+    await sendMessage(env, chatId, "Фото не найдено. Начните заново.", {
       replyMarkup: { inline_keyboard: [[{ text: "Начать", callback_data: "create" }]] },
     });
     return;
   }
+
   const reservation = await reserveQuota(
     env.DB,
     user.telegram_id,
@@ -296,26 +262,28 @@ async function queueGeneration(
   );
   if (!reservation.ok || !reservation.kind) {
     await resetFlow(env.DB, user.telegram_id);
-    await sendMessage(
-      env,
-      chatId,
-      "Лимит генераций закончился. Оформите подписку, чтобы продолжить.",
-      { replyMarkup: { inline_keyboard: [[{ text: "⭐ Оформить подписку", callback_data: "subscribe" }]] } },
-    );
+    await sendMessage(env, chatId, "Лимит генераций закончился. Оформите подписку, чтобы продолжить.", {
+      replyMarkup: { inline_keyboard: [[{ text: "⭐ Оформить подписку", callback_data: "subscribe" }]] },
+    });
     return;
   }
 
   const id = crypto.randomUUID();
+  const marketplace = detectMarketplace(userPrompt) ?? "ozon";
+  const style = detectStyle(userPrompt);
+  const taskType = detectTaskType(userPrompt);
+  const title = cleanSingleLine(userPrompt, 72) || "AI photo edit";
+
   try {
     await createGeneration(env.DB, {
       id,
       telegramId: user.telegram_id,
       chatId,
-      marketplace: draft.marketplace,
+      marketplace,
       style,
-      photoMode: draft.photoMode ?? "product",
-      title: draft.title,
-      features: draft.features ?? [],
+      title,
+      userPrompt,
+      taskType,
       sourceFileId: draft.sourceFileId,
       sourceMimeType: draft.sourceMimeType,
       quotaKind: reservation.kind,
@@ -329,17 +297,28 @@ async function queueGeneration(
   await sendMessage(
     env,
     chatId,
-    `Собираю карточку — обычно это занимает меньше минуты. После запуска осталось генераций: <b>${reservation.remaining ?? 0}</b>.`,
+    `Принял запрос. Обрабатываю фото через AI — обычно это занимает меньше минуты. Осталось генераций: <b>${reservation.remaining ?? 0}</b>.`,
   );
   ctx.waitUntil(processGeneration(env, id));
 }
 
-async function handleCallback(
+async function acceptTextStep(
   env: Env,
   ctx: ExecutionContext,
-  query: CallbackQuery,
-  origin: string,
-): Promise<void> {
+  user: UserRow,
+  message: TelegramMessage,
+): Promise<boolean> {
+  if (user.state !== "awaiting_prompt" || !message.text) return false;
+  const prompt = message.text.replace(/\u0000/g, "").trim().slice(0, MAX_PROMPT_LENGTH);
+  if (prompt.length < 5) {
+    await sendMessage(env, message.chat.id, "Опишите задачу чуть подробнее — хотя бы несколько слов.");
+    return true;
+  }
+  await queuePromptGeneration(env, ctx, user, message.chat.id, prompt);
+  return true;
+}
+
+async function handleCallback(env: Env, query: CallbackQuery): Promise<void> {
   await answerCallbackQuery(env, query.id);
   const chatId = query.message?.chat.id ?? query.from.id;
   const user = await getUser(env.DB, query.from.id);
@@ -355,58 +334,9 @@ async function handleCallback(
     return;
   }
 
-  if (data.startsWith("mode:")) {
-    const photoMode = data.slice("mode:".length);
-    const draft = parseDraft(user.draft_json);
-    if (user.state !== "awaiting_photo_mode" || !draft.sourceFileId || !isPhotoMode(photoMode)) {
-      await sendMessage(env, chatId, "Этот шаг уже неактивен. Начните заново.", { replyMarkup: mainKeyboard });
-      return;
-    }
-    await setFlow(env.DB, user.telegram_id, "awaiting_marketplace", { ...draft, photoMode });
-    await sendMessage(env, chatId, "<b>Шаг 3 из 6. Для какой площадки делаем карточку?</b>", {
-      replyMarkup: marketplaceKeyboard,
-    });
-    return;
-  }
-
-  if (data.startsWith("market:")) {
-    const marketplace = data.slice("market:".length);
-    const draft = parseDraft(user.draft_json);
-    if (user.state !== "awaiting_marketplace" || !draft.sourceFileId || !isMarketplace(marketplace)) {
-      await sendMessage(env, chatId, "Этот шаг уже неактивен. Начните заново.", { replyMarkup: mainKeyboard });
-      return;
-    }
-    await setFlow(env.DB, user.telegram_id, "awaiting_title", {
-      ...draft,
-      marketplace: marketplace as Marketplace,
-    });
-    await sendMessage(
-      env,
-      chatId,
-      "<b>Шаг 4 из 6. Напишите название товара.</b>\n\nКоротко и без характеристик — до 72 символов.",
-    );
-    return;
-  }
-
-  if (data === "features:skip") {
-    const draft = parseDraft(user.draft_json);
-    if (user.state !== "awaiting_features" || !draft.title) {
-      await sendMessage(env, chatId, "Этот шаг уже неактивен. Начните заново.", { replyMarkup: mainKeyboard });
-      return;
-    }
-    await setFlow(env.DB, user.telegram_id, "awaiting_style", { ...draft, features: [] });
-    await sendMessage(env, chatId, "<b>Шаг 6 из 6. Выберите стиль.</b>", { replyMarkup: styleKeyboard });
-    return;
-  }
-
-  if (data.startsWith("style:")) {
-    const style = data.slice("style:".length);
-    if (user.state !== "awaiting_style" || !isCardStyle(style)) {
-      await sendMessage(env, chatId, "Этот шаг уже неактивен. Начните заново.", { replyMarkup: mainKeyboard });
-      return;
-    }
-    await queueGeneration(env, ctx, user, chatId, style as CardStyle);
-  }
+  await sendMessage(env, chatId, "Эта кнопка относится к старой версии сценария. Нажмите «Создать» и пришлите фото заново.", {
+    replyMarkup: mainKeyboard,
+  });
 }
 
 async function handleCommand(
@@ -458,10 +388,15 @@ async function handleCommand(
   }
 }
 
-async function handleMessage(env: Env, message: TelegramMessage, origin: string): Promise<void> {
+async function handleMessage(
+  env: Env,
+  ctx: ExecutionContext,
+  message: TelegramMessage,
+  origin: string,
+): Promise<void> {
   if (!message.from) return;
   if (message.chat.type !== "private") {
-    await sendMessage(env, message.chat.id, "Для создания карточек откройте личный чат с ботом.");
+    await sendMessage(env, message.chat.id, "Для создания изображений откройте личный чат с ботом.");
     return;
   }
   const user = await getUser(env.DB, message.from.id);
@@ -473,7 +408,12 @@ async function handleMessage(env: Env, message: TelegramMessage, origin: string)
   const command = message.text ? commandOf(message.text) : null;
   if (command && (await handleCommand(env, user, message, command, origin))) return;
   if (await acceptPhoto(env, user, message)) return;
-  if (await acceptTextStep(env, user, message)) return;
+  if (await acceptTextStep(env, ctx, user, message)) return;
+
+  if (user.state === "awaiting_prompt") {
+    await sendMessage(env, message.chat.id, "После фото напишите текстом, что нужно сделать с изображением.");
+    return;
+  }
   await sendMessage(env, message.chat.id, "Выберите действие в меню.", { replyMarkup: mainKeyboard });
 }
 
@@ -494,10 +434,10 @@ export async function handleUpdate(
     return;
   }
   if (update.callback_query) {
-    await handleCallback(env, ctx, update.callback_query, origin);
+    await handleCallback(env, update.callback_query);
     return;
   }
-  if (update.message) await handleMessage(env, update.message, origin);
+  if (update.message) await handleMessage(env, ctx, update.message, origin);
 }
 
 export async function reportUpdateFailure(env: Env, update: TelegramUpdate): Promise<void> {
