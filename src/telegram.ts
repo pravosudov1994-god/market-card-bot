@@ -44,7 +44,7 @@ export async function getBotIdentity(env: Env, token: string): Promise<TelegramU
 
 export async function configureTelegramWebhook(env: Env, origin: string): Promise<void> {
   const commands = [
-    { command: "create", description: "Создать карточку" },
+    { command: "create", description: "Создать изображение" },
     { command: "plan", description: "Мой тариф и лимиты" },
     { command: "subscribe", description: "Оформить подписку" },
     { command: "cancel", description: "Отменить текущую генерацию" },
@@ -107,10 +107,12 @@ export async function sendPhoto(
   bytes: ArrayBuffer,
   caption: string,
   buttons?: InlineKeyboardButton[][],
+  mimeType = "image/jpeg",
 ): Promise<TelegramMessage> {
+  const extension = mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
   const form = new FormData();
   form.set("chat_id", String(chatId));
-  form.set("photo", new Blob([bytes], { type: "image/jpeg" }), "market-card.jpg");
+  form.set("photo", new Blob([bytes], { type: mimeType }), `market-card.${extension}`);
   form.set("caption", caption);
   form.set("parse_mode", "HTML");
   if (buttons) form.set("reply_markup", JSON.stringify({ inline_keyboard: buttons }));
@@ -125,7 +127,7 @@ export async function createSubscriptionLink(
 ): Promise<string> {
   return telegramApi<string>(env, "createInvoiceLink", {
     title: "Подписка на 30 дней",
-    description: `${monthlyGenerations} генераций карточек на 30 дней`,
+    description: `${monthlyGenerations} AI-генераций на 30 дней`,
     payload: `subscription:${userId}:${crypto.randomUUID()}`,
     currency: "XTR",
     prices: [{ label: "Подписка на 30 дней", amount: stars }],
