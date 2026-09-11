@@ -6,13 +6,13 @@
   "description": "Telegram-бот для генерации карточек маркетплейсов на Cloudflare",
   "scripts": {
     "dev": "wrangler dev --remote",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler d1 migrations apply market-card-bot-db --remote --yes && wrangler deploy",
     "deploy:dry": "wrangler deploy --dry-run",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "check": "npm run typecheck && npm test",
     "db:migrate:local": "wrangler d1 migrations apply market-card-bot-db --local",
-    "db:migrate:remote": "wrangler d1 migrations apply market-card-bot-db --remote",
+    "db:migrate:remote": "wrangler d1 migrations apply market-card-bot-db --remote --yes",
     "webhook:set": "node scripts/set-webhook.mjs"
   },
   "devDependencies": {
