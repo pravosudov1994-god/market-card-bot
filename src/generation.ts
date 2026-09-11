@@ -9,7 +9,6 @@ import {
   startGeneration,
   staleUnfinishedGenerations,
 } from "./db.ts";
-import { renderCardHtml } from "./templates.ts";
 import {
   downloadTelegramFile,
   getTelegramFile,
@@ -17,13 +16,12 @@ import {
   sendMessage,
   sendPhoto,
 } from "./telegram.ts";
-import type { CardStyle, Env } from "./types.ts";
+import type { CardStyle, Env, Marketplace, TaskType } from "./types.ts";
 import {
   base64ToBytes,
   bytesToBase64,
   errorCode,
   escapeHtml,
-  marketplaceLabel,
   MAX_SOURCE_BYTES,
   nowSeconds,
 } from "./utils.ts";
@@ -34,42 +32,68 @@ const AI_REFERENCE_SIZE = 480;
 const AI_OUTPUT_WIDTH = 768;
 const AI_OUTPUT_HEIGHT = 1024;
 
-function styleDirection(style: CardStyle): string {
-  return {
-    minimal:
-      "clean airy premium studio, soft off-white and pale cool-gray materials, elegant soft daylight, restrained modern ecommerce aesthetic",
-    premium:
-      "luxury editorial studio, warm champagne and dark neutral accents, cinematic rim light, polished stone or satin surfaces, high-end beauty advertising aesthetic",
-    bright:
-      "bold modern commercial studio, sophisticated colorful gradients, playful sculptural shapes, vibrant but tasteful ecommerce campaign aesthetic",
-  }[style];
+export function detectMarketplace(prompt: string): Marketplace | null {
+  const value = prompt.toLowerCase();
+  if (/\bozon\b|озон/.test(value)) return "ozon";
+  if (/wildberries|вайлдберр|вайлдбериз|\bwb\b/.test(value)) return "wildberries";
+  if (/yandex\s*market|яндекс(?:\s+|-)маркет/.test(value)) return "yandex";
+  return null;
 }
 
-export function productScenePrompt(style: CardStyle, title: string, features: string[]): string {
-  const context = [title, ...features].join("; ").replace(/\s+/g, " ").trim().slice(0, 420);
+export function detectStyle(prompt: string): CardStyle {
+  const value = prompt.toLowerCase();
+  if (/минимал|minimal|чист(?:ый|ая|ое)\s+(?:бел|светл)|white background/.test(value)) return "minimal";
+  if (/ярк|bright|colorful|неон|сочн/.test(value)) return "bright";
+  return "premium";
+}
+
+export function detectTaskType(prompt: string): TaskType {
+  const value = prompt.toLowerCase();
+  if (
+    /карточ|маркетплейс|marketplace|\bozon\b|озон|wildberries|вайлдберр|\bwb\b|yandex\s*market|яндекс(?:\s+|-)маркет|добав(?:ь|ить).*текст|надпис/.test(
+      value,
+    )
+  ) {
+    return "market_card";
+  }
+  return "edit_photo";
+}
+
+export function buildImagePrompt(userPrompt: string, taskType: TaskType): string {
+  const request = userPrompt.replace(/\s+/g, " ").trim().slice(0, 1400);
+  const taskDirection =
+    taskType === "market_card"
+      ? [
+          "Create a polished ecommerce marketplace visual, not a picture pasted inside a template.",
+          "Make the product visually dominant, with a professional composition and no large meaningless empty areas.",
+          "If the user asks for text, render only the requested text, preserve its language and spelling, and keep it readable. Do not invent prices, claims, badges or extra marketing text.",
+        ].join(" ")
+      : [
+          "Create a polished commercial photo edit that follows the user's requested scene, background, lighting and mood.",
+          "Do not add captions, badges or promotional text unless the user explicitly asks for them.",
+        ].join(" ");
+
   return [
-    "Create a vertical 3:4 premium ecommerce product photograph using input image 0 as the product reference.",
-    "Keep the same product identity, silhouette, proportions, dominant colors, packaging shape, cap shape and visible branding placement as faithfully as possible.",
-    "Do not translate, rewrite or invent packaging text. If lettering cannot be preserved accurately, keep it unobtrusive rather than creating new words.",
-    "Make the product the hero, large and centered, occupying roughly 55 to 70 percent of the image height.",
-    "Replace the original surroundings with a polished advertising set and professional commercial lighting.",
-    styleDirection(style) + ".",
-    `Product context: ${context || "consumer product"}.`,
-    "Leave useful negative space near the top and lower edges for later text overlays.",
-    "No people, hands, duplicate products, extra packages, price tags, badges, captions, floating letters, watermarks, marketplace logos or UI.",
-    "Photorealistic, clean edges, realistic contact shadow, premium catalog photography.",
+    "Edit input image 0 according to the user's request.",
+    "Treat input image 0 as the source of truth for the main product.",
+    "Unless the user explicitly asks to alter the product itself, preserve its identity, silhouette, proportions, dominant colors, packaging shape, cap shape, logo placement and visible label layout as faithfully as possible.",
+    "Do not replace the product with a different product and do not create duplicate products unless explicitly requested.",
+    "Do not translate, rewrite or invent packaging text. If tiny packaging lettering cannot be reproduced accurately, keep it visually unobtrusive rather than inventing readable words.",
+    taskDirection,
+    "Produce one coherent vertical 3:4 advertising image. No screenshot frame, phone frame, browser UI, watermark or random logo.",
+    `USER REQUEST: ${request}`,
   ].join(" ");
 }
 
 export async function buildFlux2Input(
   reference: Blob,
-  style: CardStyle,
-  title: string,
-  features: string[],
+  userPrompt: string,
+  taskType: TaskType,
 ): Promise<Record<string, unknown>> {
   const form = new FormData();
-  form.append("prompt", productScenePrompt(style, title, features));
+  form.append("prompt", buildImagePrompt(userPrompt, taskType));
   form.append("input_image_0", reference, "product-reference.jpg");
+  form.append("guidance", "3.5");
   form.append("width", String(AI_OUTPUT_WIDTH));
   form.append("height", String(AI_OUTPUT_HEIGHT));
 
@@ -114,7 +138,7 @@ export function workersAiErrorCode(error: unknown): string {
   if (status && status >= 400 && status <= 599) return `workers_ai_http_${status}`;
 
   const normalized = message.toLowerCase();
-  if (normalized.startsWith("ai_reference_")) return normalized.slice(0, 80);
+  if (normalized.startsWith("ai_reference_") || normalized.startsWith("workers_ai_")) return normalized.slice(0, 80);
   if (normalized.includes("multipart")) return "workers_ai_multipart";
   if (normalized.includes("daily free allocation") || normalized.includes("quota")) return "workers_ai_quota";
   if (normalized.includes("out of capacity")) return "workers_ai_capacity";
@@ -199,7 +223,7 @@ async function makeAiReference(env: Env, sourceUrl: string): Promise<Blob> {
   const screenshot = await env.BROWSER.quickAction("screenshot", {
     html,
     viewport: { width: AI_REFERENCE_SIZE, height: AI_REFERENCE_SIZE },
-    screenshotOptions: { type: "jpeg", quality: 88, fullPage: false },
+    screenshotOptions: { type: "jpeg", quality: 90, fullPage: false },
   });
   if (!screenshot.ok) throw new Error(`ai_reference_screenshot_${screenshot.status}`);
   const bytes = await screenshot.arrayBuffer();
@@ -231,73 +255,49 @@ export async function processGeneration(env: Env, generationId: string): Promise
     const sourceType = allowedTypes.has(candidateType) ? candidateType : "image/jpeg";
     const sourceUrl = `data:${sourceType};base64,${bytesToBase64(new Uint8Array(sourceBytes))}`;
 
-    let aiSceneUrl: string | undefined;
-    let aiUsed = false;
-    if (job.photo_mode === "product") {
-      try {
-        const reference = await makeAiReference(env, sourceUrl);
-        const features = JSON.parse(job.features_json) as string[];
-        const aiInput = await buildFlux2Input(reference, job.style, job.title, features);
-        const aiResult = await env.AI.run(FLUX2_MODEL, aiInput);
-        const extraction = await extractAiImage(aiResult);
-        if (extraction.bytes?.byteLength) {
-          aiSceneUrl = `data:${imageMime(extraction.bytes)};base64,${bytesToBase64(extraction.bytes)}`;
-          aiUsed = true;
-          await setGenerationAiResult(env.DB, job.id, true, null);
-        } else {
-          const code = extraction.errorCode ?? "workers_ai_empty_image";
-          console.warn("workers_ai_scene_unusable", {
-            generationId: job.id,
-            model: FLUX2_MODEL,
-            code,
-            shape: aiResultShape(aiResult),
-          });
-          await setGenerationAiResult(env.DB, job.id, false, code);
-        }
-      } catch (error) {
-        const code = workersAiErrorCode(error);
-        console.warn("workers_ai_scene_failed", { generationId: job.id, model: FLUX2_MODEL, code });
+    const userPrompt = (job.user_prompt || job.title || "Improve this product photo").trim();
+    const taskType: TaskType = job.task_type === "market_card" ? "market_card" : "edit_photo";
+
+    let extraction: AiImageExtraction;
+    try {
+      const reference = await makeAiReference(env, sourceUrl);
+      const aiInput = await buildFlux2Input(reference, userPrompt, taskType);
+      const aiResult = await env.AI.run(FLUX2_MODEL, aiInput);
+      extraction = await extractAiImage(aiResult);
+      if (!extraction.bytes?.byteLength) {
+        const code = extraction.errorCode ?? "workers_ai_empty_image";
+        console.warn("workers_ai_prompt_result_unusable", {
+          generationId: job.id,
+          model: FLUX2_MODEL,
+          code,
+          shape: aiResultShape(aiResult),
+        });
         await setGenerationAiResult(env.DB, job.id, false, code);
+        throw new Error(code);
       }
-    } else {
-      await setGenerationAiResult(env.DB, job.id, false, null);
+    } catch (error) {
+      const code = workersAiErrorCode(error);
+      await setGenerationAiResult(env.DB, job.id, false, code);
+      console.warn("workers_ai_prompt_failed", { generationId: job.id, model: FLUX2_MODEL, code });
+      throw new Error(code);
     }
 
-    const html = renderCardHtml({
-      marketplace: job.marketplace,
-      style: job.style,
-      photoMode: job.photo_mode,
-      title: job.title,
-      features: JSON.parse(job.features_json) as string[],
-      sourceUrl,
-      ...(aiSceneUrl ? { backgroundUrl: aiSceneUrl } : {}),
-    });
+    const result = extraction.bytes;
+    if (!result.byteLength || result.byteLength > MAX_RESULT_BYTES) throw new Error("result_file_invalid_size");
+    await setGenerationAiResult(env.DB, job.id, true, null);
 
-    const screenshot = await env.BROWSER.quickAction("screenshot", {
-      html,
-      viewport: { width: 1200, height: 1600 },
-      screenshotOptions: { type: "jpeg", quality: 90, fullPage: false },
-    });
-    if (!screenshot.ok) throw new Error(`browser_screenshot_${screenshot.status}`);
-    const resultBytes = await screenshot.arrayBuffer();
-    if (!resultBytes.byteLength || resultBytes.byteLength > MAX_RESULT_BYTES) {
-      throw new Error("result_file_invalid_size");
-    }
-
-    const aiCaption =
-      job.photo_mode === "product" && aiUsed
-        ? "AI собрал рекламную сцену по вашему фото. Проверьте упаковку, логотип и текст товара перед публикацией."
-        : "Использовано исходное фото без AI-перерисовки товара. Проверьте текст и требования площадки перед публикацией.";
-
+    const resultBuffer = result.slice().buffer;
+    const mimeType = imageMime(result);
     const resultMessage = await sendPhoto(
       env,
       job.chat_id,
-      resultBytes,
-      `✅ <b>Карточка для ${escapeHtml(marketplaceLabel(job.marketplace))} готова</b>\n\n${aiCaption}`,
+      resultBuffer,
+      "✅ <b>Готово</b>\n\nAI обработал исходное фото по вашему запросу. Перед публикацией проверьте мелкий текст, логотип и маркировку товара.",
       [
         [{ text: "✨ Создать ещё", callback_data: "create" }],
         [{ text: "📊 Мой тариф", callback_data: "plan" }],
       ],
+      mimeType,
     );
     const resultFileId = largestPhotoFileId(resultMessage);
     if (!resultFileId) throw new Error("telegram_result_file_id_missing");
@@ -310,8 +310,8 @@ export async function processGeneration(env: Env, generationId: string): Promise
       await sendMessage(
         env,
         current.chat_id,
-        "Не получилось собрать карточку. Лимит возвращён — попробуйте ещё раз через минуту.",
-        { replyMarkup: { inline_keyboard: [[{ text: "Повторить", callback_data: "create" }]] } },
+        "Не получилось обработать фото через AI. Лимит возвращён — измените описание или попробуйте ещё раз через минуту.",
+        { replyMarkup: { inline_keyboard: [[{ text: "Попробовать ещё", callback_data: "create" }]] } },
       );
     } catch {
       // Telegram may be temporarily unavailable; the failure is already recorded.
