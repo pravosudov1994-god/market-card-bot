@@ -1,0 +1,55 @@
+name: Bootstrap MarketCard AI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap/project.zip.b64'
+      - '.github/workflows/bootstrap-import.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-project:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decode and validate project archive
+        run: |
+          python - <<'PY'
+          import base64, pathlib, zipfile
+          src = pathlib.Path('bootstrap/project.zip.b64')
+          raw = ''.join(src.read_text().split())
+          data = base64.b64decode(raw, validate=True)
+          out = pathlib.Path('/tmp/market-card-bot.zip')
+          out.write_bytes(data)
+          with zipfile.ZipFile(out) as z:
+              bad = z.testzip()
+              if bad:
+                  raise SystemExit(f'Corrupt ZIP entry: {bad}')
+              for name in z.namelist():
+                  p = pathlib.PurePosixPath(name)
+                  if p.is_absolute() or '..' in p.parts:
+                      raise SystemExit(f'Unsafe ZIP path: {name}')
+              z.extractall('/tmp/market-card-bot')
+          print('Archive validated and extracted.')
+          PY
+
+      - name: Import project files
+        run: |
+          cp -a /tmp/market-card-bot/. .
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .
+          if git diff --cached --quiet; then
+            echo 'Nothing to import.'
+            exit 0
+          fi
+          git commit -m 'Import MarketCard AI project'
+          git push origin HEAD:main
