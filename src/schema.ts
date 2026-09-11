@@ -21,8 +21,6 @@ async function ensureColumn(
   try {
     await db.prepare(ddl).run();
   } catch (error) {
-    // Multiple Worker isolates can repair the same schema at the same time.
-    // If another request already added the column, treat that race as success.
     const after = await generationColumns(db);
     if (after.has(column)) return;
     throw error;
@@ -39,6 +37,16 @@ async function repairRuntimeSchema(db: D1Database): Promise<void> {
     db,
     "photo_mode",
     "ALTER TABLE generations ADD COLUMN photo_mode TEXT NOT NULL DEFAULT 'product'",
+  );
+  await ensureColumn(
+    db,
+    "user_prompt",
+    "ALTER TABLE generations ADD COLUMN user_prompt TEXT NOT NULL DEFAULT ''",
+  );
+  await ensureColumn(
+    db,
+    "task_type",
+    "ALTER TABLE generations ADD COLUMN task_type TEXT NOT NULL DEFAULT 'edit_photo'",
   );
 }
 
