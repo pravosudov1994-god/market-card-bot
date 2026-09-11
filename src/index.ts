@@ -3,6 +3,7 @@ import { getConfig } from "./config.ts";
 import { claimUpdate } from "./db.ts";
 import { scheduledCleanup } from "./generation.ts";
 import { privacyPage, termsPage } from "./legal.ts";
+import { ensureRuntimeSchema } from "./schema.ts";
 import { handleSetup } from "./setup.ts";
 import { isBotConfigured, loadRuntimeEnv } from "./settings.ts";
 import type { Env, TelegramUpdate } from "./types.ts";
@@ -87,6 +88,7 @@ async function webhook(request: Request, env: Env, ctx: ExecutionContext): Promi
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
+    await ensureRuntimeSchema(env.DB);
     if (url.pathname === "/setup") return handleSetup(request, env);
     const runtimeEnv = await loadRuntimeEnv(env);
     if (request.method === "GET" && url.pathname === "/") {
