@@ -1,1 +1,1 @@
-{"ok":false,"error":"diagnostics_fetch_failed"}
+{"ok":true,"schema":{"has_ai_error_code":false,"has_photo_mode":false},"latest":{"status":"completed","error_code":null,"ai_used":0,"created_at":1789154793,"updated_at":1789154796}}
