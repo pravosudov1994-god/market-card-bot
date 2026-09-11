@@ -20,23 +20,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p runtime-diagnostics
-          ok=0
+          status=000
           for i in $(seq 1 18); do
-            if curl -fsS --max-time 10 \
-              'https://market-card-bot.pravosudov1994.workers.dev/diagnostics/generation' \
-              -o runtime-diagnostics/latest.json; then
-              ok=1
+            status=$(curl -sS --max-time 10 \
+              -o runtime-diagnostics/latest.json \
+              -w '%{http_code}' \
+              'https://market-card-bot.pravosudov1994.workers.dev/diagnostics/generation' || true)
+            printf '%s\n' "$status" > runtime-diagnostics/http-status.txt
+            if [ "$status" = "200" ]; then
               break
             fi
             sleep 5
           done
-          if [ "$ok" -ne 1 ]; then
-            echo '{"ok":false,"error":"diagnostics_fetch_failed"}' > runtime-diagnostics/latest.json
-          fi
       - name: Store result
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add runtime-diagnostics/latest.json
-          git commit -m 'Capture sanitized runtime diagnostics' || exit 0
+          git add runtime-diagnostics/latest.json runtime-diagnostics/http-status.txt
+          git commit -m 'Capture sanitized runtime diagnostics v2' || exit 0
           git push origin HEAD:main
